@@ -1,114 +1,225 @@
+The goal of indexing is to preprocess the text T so that later queries can be answered quickly. A k-mer index is one concrete way to do this. A k-mer index is fundamentally mapping **k-mers → genome offsets** the remaining question is purely about **data structures**: how do we store and retrieve this mapping efficiently
 
-In the Introduction to indexing , we built a k-mer index by extracting all k-mers from the text T, sorting them alphabetically and grouping identical k-mers together. Conceptually, this gave us a **keyterm index**: a word (k-mer) followed by a list of places where it occurs in the genome. 
+Hash tables are introduced as one way to solve exactly this problem.
 
+---
 
-The natural question asks is: _what data structure should we actually use to store and query this index efficiently?_
+## What a hash table actually is
+A hash table stores **key–value pairs**.  
+Given a key- it can quickly retrieve the associated value.
 
-At its core a k-mer index is a **multimap**:
-A multimap is a data structure where a single key can be associated with multiple values. In our setting the key is a k-mer (for example, a 3-mer like `"ACG"`) and the values are the offsets (starting positions) in the genome where that k-mer occurs. This is unavoidable in genomics because short sequences repeat constantly, one k-mer almost never maps to just one location.
+Two components define a hash table:
 
-So conceptually, the index looks like:
+1. A **hash function**  
+    This is a deterministic function that takes a key and produces an integer. Then that integer is used to choose a position (often called a _bucket_) in an array.
+    
+2. A **table (array) of buckets**  
+    Each bucket can store zero or more key–value pairs.
+    
+The key idea is that instead of searching through all keys, we compute where a key should be stored and look only there.
 
-> k-mer → [offset₁, offset₂, offset₃, …]
+---
 
-The entire question becomes: how do we store this mapping so that queries are fast?
+## Why collisions exist and why must be handled
+Hash functions map a very large space of possible keys (e.g., all strings) into a much smaller space of bucket indices. Because of this collisions are unavoidable: different keys can map to the same bucket.
 
-## Building the index (what we are storing)
+Correctness of a hash table never depends on collisions not happening. Instead, correctness depends on having a clear rule for what to do when collisions happen.
 
-Suppose we choose k = 3. We take the genome T and at every offset, extract the 3-mer starting there. For each offset i, we create a pair:
+---
 
-If the genome is:
+## Closed addressing (separate chaining)
+
+In closed addressing each bucket stores not just one key–value pair but a collection of them. The most common conceptual model is a **linked list**, although in practice this could also be a dynamic array.
+
+**Example:**
+Assume we have a hash table with **5 buckets**:
+```
+index:   0    1    2    3    4
+table:  [ ]  [ ]  [ ]  [ ]  [ ]
+```
+Each bucket can store a linked list of key–value pairs.
+
+### 1. define a simple hash function (for illustration)
+   simple hash function:
+```
+hash(key) = (number of letters in key) mod 5
+```
+
+### 2. Insert Keys - Collision example:
+   ```
+("cat", 10)
+("dog", 20)
+("cow", 30)
+("goat", 40)
+   ```
+
+-  lets Insert ("cat", 10)
+	- length("cat") = 3
+	- hash = 3 mod 5 = 3
+	- now lets insert cat in *3rd* bucket 
+	  `[ ]  [ ]  [ ]  ("cat",10)  [ ]`
+
+- Now lets insert ("dog" ,20)
+	- length("dog") = 3
+	- hash = 3 mod 5 = 3 → collision!
+Bucket 3 already has `"cat"`.
+
+With **closed addressing**, we don’t overwrite, so we add a node to the linked list.
+`[ ]  [ ]  [ ]  ("cat",10) → ("dog",20)  [ ]`
+
+- Next lets Insert ("cow", 30)
+	- length("cow") = 3
+	- hash = 3 → collision again
+Append to the list:
+`table[3] = ("cat",10) → ("dog",20) → ("cow",30)`
+
+- On last lets Insert ("goat", 40)
+	- length("goat") = 4
+	- hash = 4 mod 5 = 4
+```
+index:   0    1    2    3                                  4
+table:  [ ]  [ ]  [ ]  ("cat",10)→("dog",20)→("cow",30)   ("goat",40)
+
+```
+### 3. lets lookup using closed addressing
+
+Lookup key = "dog"
+1. Compute hash:
+    `hash("dog") = 3`
+2. Go directly to `table[3]`
+3. Walk the linked list:
+    - compare "cat" ≠ "dog"
+    - compare "dog" = "dog" → found
+    - Return the value `20`
+> Lets note that these are only three comparisons not a full table scan.
+
+Lookup key = "goat"
+1. hash("goat") = 4
+2. go to `table[4]`
+3. first node matches → found immediately
+
+### What happens if the key we query is not present?
+Lookup key = "horse" (not present)
+1. hash("horse") = 5 mod 5 = 0
+2. go to `table[0]`
+3. bucket empty → key not present
+
+### Why this is called “closed addressing”
+The word “closed” means:
+> All elements that hash to a bucket are stored **inside that bucket**.
+
+Each bucket _owns_ its collisions.
+
+---
+
+## Now connect this to k-mer indexing
+In our case with Genome the “value” we care about is not a single number, but a list of offsets. This makes the structure a multimap:
+- key = k-mer (string of length k)
+- value = list of genome positions where that k-mer occurs
+So each entry in a bucket is:
+```
+(k-mer, [offset₁, offset₂, offset₃, …])
+```
+
+Building a hash-table k-mer index (step by step)
+Let the text be:
 ```
 T = A C G T A C G
     0 1 2 3 4 5 6
 ```
-Then the extracted pairs are:
+
+Lets build a 3-mer:
+`k =3`
+
+We create an empty hash table. Conceptually:
+
 ```
-(ACG, 0)
-(CGT, 1)
-(GTA, 2)
-(TAC, 3)
-(ACG, 4)
+table = array of buckets
 ```
-At this stage, this is just a list of (key, value) pairs. No structure yet.
+Now we scan the text from left to right.
 
-## Ordering the index (the sorted-list view)
-One way to turn this list into an index is to sort it alphabetically by the k-mer. After sorting:
+
+### Offset 0
+Substring:
+`T[0:3] = ACG`
+- hash("ACG") → bucket i
+- bucket i is empty
+- insert: `("ACG", [0])`
+
+
+### Offset 1
+Substring:
+`T[1:4] = CGT`
+- hash("CGT") → bucket j
+- bucket j is empty
+- insert: `("CGT", [1])`
+
+
+### Offset 2
+Substring:
+`T[2:5] = GTA`
+- hash("GTA") → bucket i  
+    (collision: same bucket as "ACG")
+- scan bucket i:
+    - "ACG" ≠ "GTA"
+- insert new entry:
+`("GTA", [2])`
+Now bucket i contains:
+`("ACG", [0]) → ("GTA", [2])`
+
+### Offset 3
+Substring:
+`T[3:6] = TAC`
+- hash("TAC") → bucket k
+- insert:
+`("TAC", [3])`
+
+### Offset 4
+Substring:
+`T[4:7] = ACG`
+- hash("ACG") → bucket i
+- scan bucket i:
+    - key matches "ACG"
+- append offset:
+`("ACG", [0, 4])`
+This is the multimap behavior.
+
+### Final structure of the has table looks:
 ```
-(ACG, 0)
-(ACG, 4)
-(CGT, 1)
-(GTA, 2)
-(TAC, 3)
+ACG → [0, 4]
+CGT → [1]
+GTA → [2]
+TAC → [3]
 ```
-Now identical keys are adjacent. This ordering is what allows us to treat the index like a book index: all occurrences of `"ACG"` are next to each other.
+But physically, it is stored across buckets, with collisions handled by linked lists.
 
-In this ordered representation the querying becomes a search problem over a sorted list
+---
 
-## Querying the index with binary search
-If the index is sorted alphabetically by k-mer we can use **binary search** to find a query k-mer efficiently.
+### Querying the hash-table index
 
-Binary search works by repeatedly cutting the search space in half. You look at the middle of the list and compare the key there to your query. If your query is alphabetically earlier, you discard the right half, if later, you discard the left half. Each comparison throws away half the remaining candidates.
+``q = "ACG"``
 
-This is powerful because it reduces search time from linear to logarithmic. Instead of checking thousands or millions of k-mers one by one, you narrow down rapidly to the exact region where your k-mer must live.
+now lets compute the lookup:
+``hash("ACG") → bucket i``
 
-In Python, this idea is captured by the `bisect` module. The function `bisect.bisect_left(a, x)` returns the **leftmost position** where `x` could be inserted into the sorted list `a` while preserving alphabetical order. In an index, that position tells you where occurrences of `x` _should_ start. From there, you scan forward until the k-mer changes.
+Scan bucket i:
+`("ACG", [0, 4]) → ("GTA", [2])`
 
-So with a sorted index, querying looks like:
+3. Compare keys:
+- "ACG" == "ACG" → found
+3. Retrieve the value:
+`candidate offsets = [0, 4]`
+These offsets are candidate alignment locations but not the guaranteed matches!
 
-1. Binary search to jump directly to the region of interest.
-2. Collect all adjacent entries with the same k-mer.
-3. Use their offsets as candidate positions for verification.
+---
+### Why verification is still required
+The hash table guarantees only one thing:
+> If a k-mer appears in the text, all of its occurrences will be listed.
 
-## Example:
-To extract all 3-mers with offsets and sort alphabetically by the 3-mer:
-```
-index = [
-  (ACG, 0),
-  (ACG, 4),
-  (CGT, 1),
-  (GTA, 2),
-  (TAC, 3)
-]
-```
-Query: We want to find all offsets where `"ACG"` occurs.
-`q = "ACG"`
+It does **not** guarantee:
+- that the full pattern matches
+- that surrounding characters match
+- that alignment is valid
 
+so every offset returned by the hash table must be checked by comparing the full pattern against the text. This is the same verification step used with sorted indexes.
 
-**Binary search always asks:**
-
-> “Is my query alphabetically before, after, or equal to the middle element?”
-
-### Step 1: look at the middle
-
-The middle of the list (length 5) is index 2:
-
-`middle element = (CGT, 1)`
-
-Compare:
-
-`"ACG"  vs  "CGT"`
-
-Alphabetically:
-
-`ACG < CGT`
-
-So `"ACG"` must be in the left half.
-
-We can discard everything from `(CGT, 1)` onward.
-
-### Step 2: new search space
-
-Remaining elements:
-
-`(ACG, 0) (ACG, 4)`
-
-Middle here is index 0 (relative to this sublist):
-
-`middle element = (ACG, 0)`
-
-Compare:
-
-`"ACG" == "ACG"`
-
-We found a match.
